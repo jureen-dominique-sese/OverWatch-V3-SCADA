@@ -290,6 +290,21 @@ HTML = """<!DOCTYPE html>
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
+/* DISPATCH SYSTEM STYLES */
+.crew-list { display:flex; flex-direction:column; gap:8px; margin-top:16px; }
+.crew-card { padding:10px; border:1px solid #e5e7eb; border-radius:8px; display:flex; align-items:center; justify-content:space-between; font-size:13px; }
+.crew-status { width:8px; height:8px; border-radius:50%; background:var(--sub); }
+.crew-status.idle { background:var(--green); }
+.crew-status.busy { background:var(--amber); }
+
+/* FLEET DASHBOARD GRID */
+.stat-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:20px; margin-bottom:30px; }
+.s-card { background:white; padding:20px; border-radius:12px; border-left:4px solid var(--sub); }
+
+/* DISPATCH MODAL */
+.modal-wrap { position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:3000; display:none; align-items:center; justify-content:center; }
+.modal { background:white; padding:24px; border-radius:12px; width:400px; }
+.btn-d { background:var(--red); color:white; width:100%; margin-top:8px; }
 :root{--bg:#1e1e1e;--bg-secondary:#252526;--bg-tertiary:#2d2d30;--panel:#252526;--text:#cccccc;--text-secondary:#858585;--border:#3e3e42;--accent:#007acc;--accent-hover:#1c97ea;--crit:#f48771;--warn:#cca700;--info:#4fc1ff;--ok:#89d185;--caution:#ff9800;--input-bg:#3c3c3c}
 [dark]{--bg:#0d1117;--bg-secondary:#161b22;--bg-tertiary:#21262d;--panel:#161b22;--border:#30363d;--accent:#58a6ff;--input-bg:#0d1117}
 *{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',Consolas,'Courier New',monospace}

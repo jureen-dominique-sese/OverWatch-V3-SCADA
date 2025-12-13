@@ -1,0 +1,64 @@
+# pandapower_3bus.py
+import pandapower as pp
+import pandapower.networks as pn
+import numpy as np
+
+# Create empty network
+net = pp.create_empty_network()
+
+# Buses (nominal voltage arbitrary e.g., 11 kV)
+b1 = pp.create_bus(net, vn_kv=11.0, name="Bus 1 (Slack)")
+b2 = pp.create_bus(net, vn_kv=11.0, name="Bus 2 (PQ)")
+b3 = pp.create_bus(net, vn_kv=11.0, name="Bus 3 (PQ)")
+
+# External grid (slack) at Bus1, set vm_pu and va_degree
+pp.create_ext_grid(net, bus=b1, vm_pu=1.02, va_degree=0.0, name="Slack Grid")
+
+# Line data: pandapower needs r_ohm_per_km and x_ohm_per_km or use create_line_from_parameters.
+# We'll use create_line_from_parameters and set length = 1 km to make the given impedance equal per line.
+# Convert per-unit z to ohms using base: Zbase = (V_base_kV^2)/S_base_MVA
+Sbase = 100.0  # MVA
+Vbase_kv = 11.0
+Zbase = (Vbase_kv**2) / Sbase  # in ohm
+
+# Given per-unit impedances
+z12_pu = 0.02 + 0.06j
+z13_pu = 0.08 + 0.24j
+z23_pu = 0.06 + 0.18j
+
+# Convert to series r and x in ohms (for 1 km)
+z12_ohm = z12_pu * Zbase
+z13_ohm = z13_pu * Zbase
+z23_ohm = z23_pu * Zbase
+
+# create lines (length = 1 km so total series = z_ohm)
+pp.create_line_from_parameters(net, from_bus=b1, to_bus=b2, length_km=1.0,
+                               r_ohm_per_km=z12_ohm.real, x_ohm_per_km=z12_ohm.imag,
+                               c_nf_per_km=0.0, max_i_ka=1.0, name="L1-2")
+pp.create_line_from_parameters(net, from_bus=b1, to_bus=b3, length_km=1.0,
+                               r_ohm_per_km=z13_ohm.real, x_ohm_per_km=z13_ohm.imag,
+                               c_nf_per_km=0.0, max_i_ka=1.0, name="L1-3")
+pp.create_line_from_parameters(net, from_bus=b2, to_bus=b3, length_km=1.0,
+                               r_ohm_per_km=z23_ohm.real, x_ohm_per_km=z23_ohm.imag,
+                               c_nf_per_km=0.0, max_i_ka=1.0, name="L2-3")
+
+# Loads (pandapower expects positive P, Q as consumption in MW/Mvar)
+# Convert pu to MW: P_MW = P_pu * Sbase
+pp.create_load(net, bus=b2, p_mw=1.5 * Sbase/ Sbase, q_mvar=0.5 * Sbase/ Sbase, name="Load B2")
+pp.create_load(net, bus=b3, p_mw=0.9 * Sbase/ Sbase, q_mvar=0.3 * Sbase/ Sbase, name="Load B3")
+# (Using Sbase/Sbase cancels — but kept so unit intent is explicit. You may instead use p_mw=1.5, q_mvar=0.5
+# if you treat numbers as MW/Mvar directly with base 1.)
+
+# Run power flow
+pp.runpp(net, calculate_voltage_angles=True)
+
+# Print results
+print("=== pandapower results ===")
+print(net.res_bus[['vm_pu', 'va_degree']])
+print("\nLine flows (from_bus, to_bus, p_from_mw, q_from_mvar):")
+print(net.res_line[['p_from_mw', 'q_from_mvar', 'loading_percent']])
+print("\nTotal system losses (MW):", net.res_bus['va_degree'].sum())  # placeholder, use res_line sums for losses
+
+# More meaningful losses:
+total_loss_mw = net.res_line['p_from_mw'].sum() + net.res_line['p_to_mw'].sum()
+print("Approx sum of line P flows (may be double-count):", total_loss_mw)
