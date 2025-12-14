@@ -5,7 +5,7 @@ function generate_database()
 
     fprintf('Generating Theoretical Data... ');
     
-    max_len = 50.0; % 50 km line
+    max_len = 10.0; % 50 km line
     step = 0.01;    % 10 meter resolution
     distances = step:step:max_len;
     
@@ -30,6 +30,22 @@ function generate_database()
     end
     
     % Save specific variables
-    save('Fault_Lookup_Table.mat', 'data_SLG', 'data_LL', 'data_3PH');
-    fprintf('Done! Database Saved.\n');
+% --- NEW CSV EXPORT WITH HEADERS (Octave Compatible) ---
+    % 1. Prepare the data matrix
+    data_SLG_tagged = [data_SLG, ones(size(data_SLG,1), 1) * 1];
+    data_LL_tagged  = [data_LL,  ones(size(data_LL,1), 1) * 2];
+    data_3PH_tagged = [data_3PH, ones(size(data_3PH,1), 1) * 3];
+
+    full_table = [data_SLG_tagged; data_LL_tagged; data_3PH_tagged];
+
+    % 2. Write the Header Row
+    fid = fopen('Fault_Lookup_Table.csv', 'w');
+    fprintf(fid, 'Distance_km,Ia,Ib,Ic,Fault_Type\n');
+    fclose(fid);
+
+    % 3. Append the Numeric Data
+    % '-append' adds to the file without overwriting the header
+    dlmwrite('Fault_Lookup_Table.csv', full_table, '-append', 'precision', '%.4f');
+    
+    fprintf('Done! Database Saved as Fault_Lookup_Table.csv (with headers).\n');
 end

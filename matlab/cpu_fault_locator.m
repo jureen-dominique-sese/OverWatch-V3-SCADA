@@ -11,11 +11,21 @@ function report = cpu_fault_locator(sensor_readings)
     report.closest_unit = 0;
     report.measured_amps = 0;
 
-    % Load the "Cheat Sheet"
-    if ~isfile('Fault_Lookup_Table.mat')
-        error('Lookup Table not found! Run generate_database.m first.');
+% Load the "Cheat Sheet" from CSV
+    if exist('Fault_Lookup_Table.csv', 'file') ~= 2
+        error('Lookup Table (CSV) not found! Run generate_database.m first.');
     end
-    load('Fault_Lookup_Table.mat', 'data_SLG', 'data_LL', 'data_3PH');
+    
+    % Read the master CSV
+    % ARGUMENTS: (filename, RowOffset, ColOffset)
+    % We use RowOffset = 1 to SKIP the header row.
+    full_data = csvread('Fault_Lookup_Table.csv', 1, 0);
+    
+    % Split back into specific tables based on Column 5 (Type)
+    data_SLG = full_data(full_data(:,5) == 1, 1:4);
+    data_LL  = full_data(full_data(:,5) == 2, 1:4);
+    data_3PH = full_data(full_data(:,5) == 3, 1:4);
+    
     sys = get_system_config();
     
     %% STEP 1: ZONE IDENTIFICATION
