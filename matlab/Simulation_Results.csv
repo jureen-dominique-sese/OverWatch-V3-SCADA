@@ -1,20 +1,20 @@
 TABLE 1: DETAILED TEST RESULTS
 ID,Actual_Dist_km,Fault_Type,Est_Lookup_km,Lookup_Ref_Current_A,Lookup_Ref_Row_Index,Err_Lookup_m,Est_Imped_km,Calc_Impedance_Ohms,Err_Imped_m,Pct_Err_Lookup,Pct_Err_Imped
-1.0000,0.3808,2.0000,0.3600,20.7826,7807.2215,36.0000,0.3865,5.6795,0.0049,5.4579,1.4915
-2.0000,0.1932,1.0000,0.1900,3.2262,9223.8168,19.0000,0.1941,0.8481,0.0041,1.6697,0.4389
+1.0000,0.2248,2.0000,0.2100,14.7923,8442.7680,21.0000,0.2281,3.3528,0.0029,6.5804,1.4915
+2.0000,0.1414,1.0000,0.1400,1.4339,9633.2574,14.0000,0.1421,0.6208,0.0030,1.0138,0.4389
 
 
 TABLE 2: PERFORMANCE SUMMARY (AGGREGATED)
 Metric,Lookup_Table_Method,Impedance_Method
-Mean_Abs_Error_(m),12.00,3.26
-Max_Error_(m),20.78,5.68
-MAPE_(%),3.56,0.97
-Std_Deviation_(m),12.41,3.42
+Mean_Abs_Error_(m),8.11,1.99
+Max_Error_(m),14.79,3.35
+MAPE_(%),3.80,0.97
+Std_Deviation_(m),9.45,1.93
 Win_Rate_(%),0.0,100.0
 
 
 TABLE 3: ACCURACY BY FAULT TYPE
 Fault_Type,Lookup_Avg_Err_(m),Impedance_Avg_Err_(m),Difference_(m)
-SLG (1-Phase),3.23,0.85,-2.38
-LL (2-Phase),20.78,5.68,-15.10
+SLG (1-Phase),1.43,0.62,-0.81
+LL (2-Phase),14.79,3.35,-11.44
 3PH (Balanced),NaN,NaN,NaN
