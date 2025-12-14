@@ -114,3 +114,15 @@ legend('Lookup Method', 'Impedance Method', 'Perfect Accuracy', 'Location', 'sou
 grid on;
 
 fprintf('\n📊 Comparison plots generated!\n');
+% Add to end of compare_methods.m
+
+fprintf('\n\n=== TABLE FOR THESIS ===\n');
+fprintf('Distance | Fault Type | Lookup Error | Impedance Error | Improvement\n');
+fprintf('---------|------------|--------------|-----------------|------------\n');
+
+for i = 1:size(results_table, 1)
+    improvement = results_table(i,6) - results_table(i,4);
+    fprintf('%7.1f km | Type %d     | %10.1f m | %13.1f m | %+9.1f m\n', ...
+            results_table(i,1), results_table(i,2), ...
+            results_table(i,4), results_table(i,6), improvement);
+end
