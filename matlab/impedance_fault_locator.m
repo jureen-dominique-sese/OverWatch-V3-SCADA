@@ -1,38 +1,39 @@
 function distance_km = impedance_fault_locator(V_measured, I_measured, fault_type)
 % IMPEDANCE_FAULT_LOCATOR
-% Traditional impedance-based fault location method
-%
-% INPUTS:
-%   V_measured: Complex voltage at relay point (pu or actual)
-%   I_measured: Complex current at relay point (pu or actual)
-%   fault_type: 1=SLG, 2=LL, 3=3PH
-%
-% OUTPUT:
-%   distance_km: Estimated fault distance
+% Calculates distance based on V/I and line parameters.
+% Input V and I must be complex PU.
 
     sys = get_system_config();
     
-    % Calculate apparent impedance
-    Z_apparent = V_measured / I_measured;
+    % Check for zero current to avoid NaN
+    if abs(I_measured) < 1e-5
+        distance_km = 0;
+        return;
+    end
     
-    % Remove source impedance
-    Z_line = Z_apparent - sys.Z_source;
+    % 1. Calculate Apparent Impedance (Z_seen)
+    Z_seen = V_measured / I_measured;
     
-    % Select appropriate line impedance based on fault type
-    if fault_type == 1  % SLG
-        % For ground faults, use composite impedance
-        z_per_km = sys.z1_pu_km + 2*sys.z0_pu_km;
+    % 2. Determine Line Impedance Characteristic (z_per_km)
+    % This depends on the loop we measured.
+    
+    if fault_type == 1  % SLG (Phase A-G)
+        % The loop impedance for Phase-Ground involves Z0.
+        % Mathematical derivation matches: (2*Z1 + Z0) / 3
+        z_per_km = (2*sys.z1_pu_km + sys.z0_pu_km) / 3;
         
-    elseif fault_type == 2  % LL
-        % For line-to-line, current flows through 2 phases
-        z_per_km = 2 * sys.z1_pu_km;
+    elseif fault_type == 2  % LL (Phase B-C)
+        % We measured Phase B V/I.
+        % In a B-C fault, the impedance seen by Phase B relay is approx Z1.
+        % (Strictly V_LL/I_LL = 2*Z1, but V_ph/I_ph approx Z1 in this balanced setup)
+        z_per_km = sys.z1_pu_km;
         
     elseif fault_type == 3  % 3PH
-        % For balanced 3-phase, use positive sequence only
+        % Balanced 3-phase sees positive sequence impedance
         z_per_km = sys.z1_pu_km;
     end
     
-    % Calculate distance
-    distance_km = abs(Z_line) / abs(z_per_km);
+    % 3. Calculate Distance
+    distance_km = abs(Z_seen) / abs(z_per_km);
     
 end
