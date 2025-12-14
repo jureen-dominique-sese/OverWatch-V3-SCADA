@@ -17,7 +17,7 @@ fprintf('╚══════════════════════�
 fprintf('Step 0: Generating fresh Fault Lookup Table... ');
 
 % Simulation parameters for the database
-max_len = 10.0; % 10 km line
+max_len = 80.0; % 10 km line
 step = 0.01;    % 10 meter resolution
 distances = step:step:max_len;
 
@@ -47,9 +47,9 @@ fprintf('Done! Database Updated.\n');
 
 
 %% --- STEP 1: GENERATE 1500 RANDOM TEST CASES ---
-num_tests = 1500;
+num_tests = 15;
 min_dist = 0.1;
-max_dist = 10.0;
+max_dist = 80.0;
 
 % Set seed for reproducibility
 rand('seed', 42); 
