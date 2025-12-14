@@ -1,0 +1,21 @@
+TABLE 1: DETAILED TEST RESULTS
+ID,Actual_Dist_km,Fault_Type,Est_Lookup_km,Lookup_Ref_Current_A,Lookup_Ref_Row_Index,Err_Lookup_m,Est_Imped_km,Calc_Impedance_Ohms,Err_Imped_m,Pct_Err_Lookup,Pct_Err_Imped
+1.0000,0.3808,1.0000,0.3800,0.7826,7933.9206,38.0000,0.3797,1.1207,0.0079,0.2055,0.2943
+2.0000,0.1932,2.0000,0.2000,6.7738,8488.6557,20.0000,0.1919,1.3446,0.0024,3.5056,0.6958
+3.0000,0.6071,3.0000,0.6200,12.8862,7967.2295,62.0000,0.6098,2.6662,0.0077,2.1225,0.4392
+
+
+TABLE 2: PERFORMANCE SUMMARY (AGGREGATED)
+Metric,Lookup_Table_Method,Impedance_Method
+Mean_Abs_Error_(m),6.81,1.71
+Max_Error_(m),12.89,2.67
+MAPE_(%),1.94,0.48
+Std_Deviation_(m),6.05,0.84
+Win_Rate_(%),33.3,66.7
+
+
+TABLE 3: ACCURACY BY FAULT TYPE
+Fault_Type,Lookup_Avg_Err_(m),Impedance_Avg_Err_(m),Difference_(m)
+SLG (1-Phase),0.78,1.12,0.34
+LL (2-Phase),6.77,1.34,-5.43
+3PH (Balanced),12.89,2.67,-10.22

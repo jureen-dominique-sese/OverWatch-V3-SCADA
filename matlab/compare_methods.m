@@ -4,20 +4,40 @@
 
 clear; clc;
 
+%% --- STEP 0: USER INPUT CONFIGURATION ---
+fprintf('=== SIMULATION SETUP ===\n');
+% 1. Get Line Length
+user_len = input('Enter Maximum Line Length (km) [Default: 50]: ');
+if isempty(user_len)
+    max_len = 50.0; 
+else
+    max_len = double(user_len);
+end
+
+% 2. Get Sample Size
+user_tests = input('Enter Number of Test Cases [Default: 1000]: ');
+if isempty(user_tests)
+    num_tests = 1000;
+else
+    num_tests = double(user_tests);
+end
+
+fprintf('\nConfiguration Set: %.1f km line, %d test cases.\n\n', max_len, num_tests);
+
+
 fprintf('╔════════════════════════════════════════════════════════╗\n');
 fprintf('║   [Simulation] Fault Lookup Table vs Impedance Method  ║\n');
 fprintf('╠════════════════════════════════════════════════════════╣\n');
 fprintf('║ EXPERIMENTAL CONDITIONS:                               ║\n');
 fprintf('║ 1. Ground Truth: Auto-generated before test run.       ║\n');
-fprintf('║ 2. Sample Size: 1000 Randomized Test Cases.            ║\n');
+fprintf('║ 2. Sample Size: %-6d Randomized Test Cases.            ║\n', num_tests);
 fprintf('║ 3. Noise: +/- 1%% Random Sensor Error Injected.       ║\n');
 fprintf('╚════════════════════════════════════════════════════════╝\n\n');
 
-%% --- STEP 0: GENERATE REFERENCE DATABASE (Ground Truth) ---
-fprintf('Step 0: Generating fresh Fault Lookup Table... ');
+%% --- STEP 1: GENERATE REFERENCE DATABASE (Ground Truth) ---
+fprintf('Step 1: Generating fresh Fault Lookup Table (0 - %.1f km)... ', max_len);
 
 % Simulation parameters for the database
-max_len = 80.0; % 10 km line
 step = 0.01;    % 10 meter resolution
 distances = step:step:max_len;
 
@@ -46,10 +66,9 @@ save('Fault_Lookup_Table.mat', 'data_SLG', 'data_LL', 'data_3PH');
 fprintf('Done! Database Updated.\n');
 
 
-%% --- STEP 1: GENERATE 1500 RANDOM TEST CASES ---
-num_tests = 15;
+%% --- STEP 2: GENERATE RANDOM TEST CASES ---
 min_dist = 0.1;
-max_dist = 80.0;
+max_dist = max_len;
 
 % Set seed for reproducibility
 rand('seed', 42); 
@@ -65,75 +84,104 @@ results_table = [];
 
 fprintf('Running %d simulations with noise injection... Please wait.\n', num_tests);
 
-%% --- STEP 2: RUN SIMULATION LOOP ---
+%% --- STEP 3: RUN SIMULATION LOOP ---
 for i = 1:num_tests
     actual_dist = test_cases(i, 1);
     fault_type = test_cases(i, 2);
     
     % METHOD 1: LOOKUP TABLE (Overwatch)
-    % This uses the table we just generated in Step 0
     sensor_data = simulate_overwatch_network(actual_dist, fault_type);
     result_lookup = cpu_fault_locator(sensor_data.readings);
     
     est_lookup = result_lookup.location;
     error_lookup = abs(est_lookup - actual_dist) * 1000;  % Convert to meters
     
+    % Retrieve Actual Lookup Table Value (Theoretical) for the Estimated Distance
+    % Logic matches cpu_fault_locator selection
+    if fault_type == 1 % SLG
+        tbl = data_SLG; col = 2; % Ia
+    elseif fault_type == 2 % LL
+        tbl = data_LL; col = 3; % Ib
+    else % 3PH
+        tbl = data_3PH; col = 2; % Ia
+    end
+    
+    % Find Row Index (Line #) corresponding to the Estimated Distance
+    % Distance is column 1. Resolution is step (0.01).
+    % Index = round(dist / step)
+    lookup_idx = round(est_lookup / step);
+    if lookup_idx < 1, lookup_idx = 1; end
+    if lookup_idx > size(tbl, 1), lookup_idx = size(tbl, 1); end
+    
+    lookup_I_theory = tbl(lookup_idx, col);
+    
+    
     % METHOD 2: IMPEDANCE-BASED (Traditional)
     [V_relay, I_relay] = simulate_relay_measurements(actual_dist, fault_type);
     est_impedance = impedance_fault_locator(V_relay, I_relay, fault_type);
     error_impedance = abs(est_impedance - actual_dist) * 1000;  % Convert to meters
     
+    % Calculate the Impedance Magnitude (Z) seen by the relay
+    if abs(I_relay) > 0
+        calc_Z_mag = abs(V_relay / I_relay);
+    else
+        calc_Z_mag = 0;
+    end
+    
     % Calculate % Error
     pct_err_lookup = (error_lookup / (actual_dist*1000)) * 100;
     pct_err_imp = (error_impedance / (actual_dist*1000)) * 100;
     
-    % Store: [Dist, Type, Est_L, Err_L, Est_I, Err_I, %_L, %_I]
+    % Store: 
+    % 1.ActDist, 2.Type, 
+    % 3.Est_L, 4.Err_L, 5.Lookup_I, 6.Lookup_Idx 
+    % 7.Est_I, 8.Err_I, 9.Calc_Z
+    % 10.%_L, 11.%_I
     results_table = [results_table; 
                      actual_dist, fault_type, ...
-                     est_lookup, error_lookup, ...
-                     est_impedance, error_impedance, ...
+                     est_lookup, error_lookup, lookup_I_theory, lookup_idx, ...
+                     est_impedance, error_impedance, calc_Z_mag, ...
                      pct_err_lookup, pct_err_imp];
 end
 
-%% --- STEP 3: CALCULATE STATISTICS ---
-% Overall Stats
+%% --- STEP 4: CALCULATE STATISTICS ---
+% Update Indices due to new columns
+% Err_L is col 4, Err_I is col 8
+% %_L is col 10, %_I is col 11
+
 avg_err_L = mean(results_table(:, 4));
-avg_err_I = mean(results_table(:, 6));
+avg_err_I = mean(results_table(:, 8));
 max_err_L = max(results_table(:, 4));
-max_err_I = max(results_table(:, 6));
-mape_L = mean(results_table(:, 7));
-mape_I = mean(results_table(:, 8));
+max_err_I = max(results_table(:, 8));
+mape_L = mean(results_table(:, 10));
+mape_I = mean(results_table(:, 11));
 
 % Win Rates
-wins_L = sum(results_table(:,4) < results_table(:,6));
+wins_L = sum(results_table(:,4) < results_table(:,8));
 win_rate_L = (wins_L / num_tests) * 100;
 
-% Group by Fault Type for Deep Analysis
-% Type 1: SLG
+% Group by Fault Type
 idx1 = find(results_table(:,2) == 1);
 avg_err_L_1 = mean(results_table(idx1, 4));
-avg_err_I_1 = mean(results_table(idx1, 6));
+avg_err_I_1 = mean(results_table(idx1, 8));
 
-% Type 2: LL
 idx2 = find(results_table(:,2) == 2);
 avg_err_L_2 = mean(results_table(idx2, 4));
-avg_err_I_2 = mean(results_table(idx2, 6));
+avg_err_I_2 = mean(results_table(idx2, 8));
 
-% Type 3: 3PH
 idx3 = find(results_table(:,2) == 3);
 avg_err_L_3 = mean(results_table(idx3, 4));
-avg_err_I_3 = mean(results_table(idx3, 6));
+avg_err_I_3 = mean(results_table(idx3, 8));
 
 
-%% --- STEP 4: GENERATE PLOTS (Octave Compatible) ---
+%% --- STEP 5: GENERATE PLOTS (Octave Compatible) ---
 figure(1);
 clf;
 
 % Subplot 1: Error Distribution
 subplot(2,2,1);
-% Use hist (older function) instead of histogram
 [nL, xL] = hist(results_table(:,4), 15);
-[nI, xI] = hist(results_table(:,6), 15);
+[nI, xI] = hist(results_table(:,8), 15);
 plot(xL, nL, 'b-o', 'LineWidth', 2); hold on;
 plot(xI, nI, 'r-s', 'LineWidth', 2);
 title('Error Distribution (Freq)');
@@ -145,7 +193,7 @@ grid on;
 subplot(2,2,2);
 plot(results_table(:,1), results_table(:,4), 'bo', 'MarkerFaceColor', 'b', 'MarkerSize', 4);
 hold on;
-plot(results_table(:,1), results_table(:,6), 'rs', 'MarkerFaceColor', 'r', 'MarkerSize', 4);
+plot(results_table(:,1), results_table(:,8), 'rs', 'MarkerFaceColor', 'r', 'MarkerSize', 4);
 title('Error vs. Distance');
 xlabel('Distance (km)'); ylabel('Error (meters)');
 legend('Lookup', 'Impedance');
@@ -164,26 +212,30 @@ grid on;
 fprintf('\n📊 Plots generated in Figure 1.\n');
 
 
-%% --- STEP 5: PRINT TABLES FOR THESIS ---
+%% --- STEP 6: PRINT TABLES TO TERMINAL ---
 
 fprintf('\n\n');
-fprintf('========================================================================================\n');
-fprintf('                              TABLE 1: DETAILED TEST RESULTS                            \n');
-fprintf('========================================================================================\n');
-fprintf(' ID | Dist (km) | Type | Lookup Err (m) | Lookup Dev(%%) | Imp. Err (m) | Imp. Dev(%%) | Winner\n');
-fprintf('----|-----------|------|----------------|---------------|--------------|--------------|-------\n');
+fprintf('==================================================================================================================\n');
+fprintf('                                          TABLE 1: DETAILED TEST RESULTS                                          \n');
+fprintf('==================================================================================================================\n');
+fprintf(' ID | Dist(km) | Type | Lookup(km) | Lookup Ref(A) (Row#) | Lookup Err(m) | Imped(km) | Calc Z(Ω) | Imped Err(m) \n');
+fprintf('----|----------|------|------------|----------------------|---------------|-----------|-----------|--------------\n');
 
-for i = 1:num_tests
-    if results_table(i,4) < results_table(i,6)
-        win = 'Lookup';
-    else
-        win = 'Imped.';
-    end
+% Print limits to avoid terminal spam
+print_limit = min(num_tests, 50); 
+for i = 1:print_limit
     
-    fprintf('%3d | %9.3f |  %d   | %12.2f m | %11.2f %% | %10.2f m | %10.2f %% | %s\n', ...
+    fprintf('%3d | %8.3f |  %d   |  %8.3f  | %9.2f A (#%5d) | %9.2f m   | %9.3f | %8.2fΩ | %9.2f m \n', ...
             i, results_table(i,1), results_table(i,2), ...
-            results_table(i,4), results_table(i,7), ...
-            results_table(i,6), results_table(i,8), win);
+            results_table(i,3), ...                  % Est Lookup Dist
+            results_table(i,5), results_table(i,6), ... % Ref Current & Row Index
+            results_table(i,4), ...                  % Lookup Error
+            results_table(i,7), ...                  % Est Imped Dist
+            results_table(i,9), ...                  % Calc Z
+            results_table(i,8));                     % Imped Error
+end
+if num_tests > print_limit
+    fprintf('... (Showing first %d of %d tests) ...\n', print_limit, num_tests);
 end
 
 fprintf('\n\n');
@@ -195,7 +247,7 @@ fprintf('----------------------------|---------------------------|--------------
 fprintf(' Mean Absolute Error (MAE)  | %10.2f meters         | %10.2f meters\n', avg_err_L, avg_err_I);
 fprintf(' Max Recorded Error         | %10.2f meters         | %10.2f meters\n', max_err_L, max_err_I);
 fprintf(' Mean %% Error (MAPE)       | %10.2f %%              | %10.2f %%\n', mape_L, mape_I);
-fprintf(' Standard Deviation         | %10.2f meters         | %10.2f meters\n', std(results_table(:,4)), std(results_table(:,6)));
+fprintf(' Standard Deviation         | %10.2f meters         | %10.2f meters\n', std(results_table(:,4)), std(results_table(:,8)));
 fprintf(' Win Rate (Cases Won)       | %9.1f %%               | %9.1f %%\n', win_rate_L, 100-win_rate_L);
 fprintf('----------------------------|---------------------------|------------------------------\n');
 
@@ -226,7 +278,7 @@ fprintf(' 3PH (Balanced)  | %10.2f m     | %13.2f m      | %s%.2f m\n', ...
     avg_err_L_3, avg_err_I_3, s3, imp_3);
 fprintf('-----------------|------------------|---------------------|-------------------\n');
 
-% Final Verdict (Calculated dynamic output)
+% Final Verdict
 fprintf('\n>>> FINAL VERDICT: \n');
 if avg_err_L < avg_err_I
     improvement = ((avg_err_I - avg_err_L) / avg_err_I) * 100;
@@ -242,29 +294,62 @@ else
     fprintf('     - Total Victories: %d out of %d test cases (%.1f%% Win Rate)\n', wins_I, num_tests, win_rate_I);
 end
 
-%% --- STEP 6: STRATEGIC CONCLUSION ---
 fprintf('\n\n');
 fprintf('========================================================================================\n');
 fprintf('                          STRATEGIC ANALYSIS & CONCLUSION                               \n');
 fprintf('========================================================================================\n');
-
 fprintf('1. COMPARATIVE DISCREPANCY ANALYSIS:\n');
-fprintf('   The results demonstrate a fundamental trade-off between the two methodologies:\n');
 fprintf('   - The [Impedance Method] offers infinite theoretical resolution but is highly\n');
-fprintf('     sensitive to sensor noise (CT/PT Class errors). As shown in the tables, random\n');
-fprintf('     1%% sensor deviations propagate directly into distance estimation errors.\n');
-fprintf('   - The [Lookup Table Method] is inherently robust against random noise because it\n');
-fprintf('     uses pattern matching (nearest neighbor search). However, its accuracy is \n');
-fprintf('     strictly limited by the database generation step size (10m in this test).\n\n');
+fprintf('     sensitive to sensor noise, causing error scaling at long distances.\n');
+fprintf('   - The [Lookup Table Method] is robust against noise but limited by grid steps.\n');
+fprintf('   - CROSSOVER POINT: Impedance wins at short range; Lookup wins at long range.\n\n');
 
-fprintf('2. UTILIZATION STRATEGY:\n');
-fprintf('   Based on these findings, the proposed Lookup Table method is recommended for:\n');
-fprintf('   - PRIMARY VALIDATION: Acting as a "Double-Check" mechanism to flag gross errors\n');
-fprintf('     in traditional impedance relays.\n');
-fprintf('   - HIGH-NOISE ENVIRONMENTS: In older substations where instrument transformers may\n');
-fprintf('     have degraded accuracy (>1%% error), the Lookup Table provides a stable fallback.\n');
-fprintf('   - COMPLEX TOPOLOGIES: Since the database can be generated for ANY network shape\n');
-fprintf('     (including branches), it bypasses the linear topology limitations of standard\n');
-fprintf('     impedance formulas.\n');
 
-fprintf('\nEnd of Report.\n');
+%% --- STEP 7: EXPORT FULL REPORT TO CSV (EXCEL) ---
+fprintf('\n========================================================================================\n');
+fprintf('                              EXPORTING FULL REPORT TO EXCEL (CSV)                      \n');
+fprintf('========================================================================================\n');
+
+csv_filename = 'Simulation_Results.csv';
+fid = fopen(csv_filename, 'w');
+
+if fid ~= -1
+    % --- SECTION 1: DETAILED TEST CASES ---
+    fprintf(fid, 'TABLE 1: DETAILED TEST RESULTS\n');
+    % Updated Header to include new columns
+    fprintf(fid, 'ID,Actual_Dist_km,Fault_Type,Est_Lookup_km,Lookup_Ref_Current_A,Lookup_Ref_Row_Index,Err_Lookup_m,Est_Imped_km,Calc_Impedance_Ohms,Err_Imped_m,Pct_Err_Lookup,Pct_Err_Imped\n');
+    
+    % Manually write rows to handle mixed types/clean formatting if needed, but dlmwrite is faster for pure numbers
+    % We will prep a matrix with ID for export
+    export_matrix = [(1:num_tests)', results_table];
+    fclose(fid);
+    
+    % Append the data matrix
+    dlmwrite(csv_filename, export_matrix, '-append', 'precision', '%.4f');
+    
+    % Re-open to append the Summary Tables
+    fid = fopen(csv_filename, 'a');
+    
+    % --- SECTION 2: PERFORMANCE SUMMARY ---
+    fprintf(fid, '\n\nTABLE 2: PERFORMANCE SUMMARY (AGGREGATED)\n');
+    fprintf(fid, 'Metric,Lookup_Table_Method,Impedance_Method\n');
+    fprintf(fid, 'Mean_Abs_Error_(m),%.2f,%.2f\n', avg_err_L, avg_err_I);
+    fprintf(fid, 'Max_Error_(m),%.2f,%.2f\n', max_err_L, max_err_I);
+    fprintf(fid, 'MAPE_(%%),%.2f,%.2f\n', mape_L, mape_I);
+    fprintf(fid, 'Std_Deviation_(m),%.2f,%.2f\n', std(results_table(:,4)), std(results_table(:,8)));
+    fprintf(fid, 'Win_Rate_(%%),%.1f,%.1f\n', win_rate_L, 100-win_rate_L);
+    
+    % --- SECTION 3: ACCURACY BY FAULT TYPE ---
+    fprintf(fid, '\n\nTABLE 3: ACCURACY BY FAULT TYPE\n');
+    fprintf(fid, 'Fault_Type,Lookup_Avg_Err_(m),Impedance_Avg_Err_(m),Difference_(m)\n');
+    fprintf(fid, 'SLG (1-Phase),%.2f,%.2f,%.2f\n', avg_err_L_1, avg_err_I_1, avg_err_I_1 - avg_err_L_1);
+    fprintf(fid, 'LL (2-Phase),%.2f,%.2f,%.2f\n', avg_err_L_2, avg_err_I_2, avg_err_I_2 - avg_err_L_2);
+    fprintf(fid, '3PH (Balanced),%.2f,%.2f,%.2f\n', avg_err_L_3, avg_err_I_3, avg_err_I_3 - avg_err_L_3);
+    
+    fclose(fid);
+    
+    fprintf('  ✅ Success! Full report saved to: %s\n', csv_filename);
+    fprintf('  This file contains all test cases + summary tables at the bottom.\n');
+else
+    fprintf('  ❌ Error: Could not open file for writing.\n');
+end
