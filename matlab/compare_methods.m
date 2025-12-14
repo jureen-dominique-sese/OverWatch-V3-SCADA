@@ -61,9 +61,21 @@
         data_3PH = [data_3PH; d, I_3ph(1), I_3ph(2), I_3ph(3)];
     end
 
-    % Save the database so cpu_fault_locator can use it
-    save('Fault_Lookup_Table.mat', 'data_SLG', 'data_LL', 'data_3PH');
-    fprintf('Done! Database Updated.\n');
+% Save the database so cpu_fault_locator can use it (CSV VERSION)
+data_SLG_tagged = [data_SLG, ones(size(data_SLG,1), 1) * 1];
+data_LL_tagged  = [data_LL,  ones(size(data_LL,1), 1) * 2];
+data_3PH_tagged = [data_3PH, ones(size(data_3PH,1), 1) * 3];
+
+full_table = [data_SLG_tagged; data_LL_tagged; data_3PH_tagged];
+
+% Write Header
+fid = fopen('Fault_Lookup_Table.csv', 'w');
+fprintf(fid, 'Distance_km,Ia,Ib,Ic,Fault_Type\n');
+fclose(fid);
+
+% Append Data
+dlmwrite('Fault_Lookup_Table.csv', full_table, '-append', 'precision', '%.4f');
+fprintf('Done! Database Updated (CSV with headers).\n');
 
 
     %% --- STEP 2: GENERATE RANDOM TEST CASES ---

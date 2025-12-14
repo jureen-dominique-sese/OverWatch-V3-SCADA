@@ -11,7 +11,7 @@ function [sensor_data, max_noise_pct] = simulate_overwatch_network(actual_fault_
     
     % --- NOISE CONFIGURATION ---
     % Using specific deviation data (5.0A ref)
-    std_amps = 0.01212453521; % Update this every now and then
+    std_amps = 0; % Update this every now and then
     SENSOR_STD = std_amps / 5.0; 
     
     max_noise_pct = 0; % Track the worst noise in this specific run

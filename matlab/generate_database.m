@@ -5,7 +5,7 @@ function generate_database()
 
     fprintf('Generating Theoretical Data... ');
     
-    max_len = 10.0; % 50 km line
+    max_len = 55.0; % 50 km line
     step = 0.01;    % 10 meter resolution
     distances = step:step:max_len;
     
