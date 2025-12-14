@@ -44,12 +44,11 @@ function [V_relay, I_relay] = simulate_relay_measurements(fault_dist, fault_type
     % Add +/- 1% error magnitude and slight phase shift error
     % This represents CT and PT inaccuracy (Class 1.0 sensors)
     
-    noise_mag_V = 1 + (0.01 * (2*rand() - 1)); % +/- 1% Magnitude
-    noise_mag_I = 1 + (0.01 * (2*rand() - 1)); 
-    
-    % Optional: Add tiny phase error (e.g., +/- 0.5 degrees)
-    % noise_ph_V = exp(1j * (0.5 * pi/180 * (2*rand() - 1)));
-    
+    SENSOR_STD = 0.01; % <--- Update this to match your measured STD
+
+    noise_mag_V = 1 + (SENSOR_STD * randn()); 
+    noise_mag_I = 1 + (SENSOR_STD * randn());
+
     V_relay = V_perfect * noise_mag_V;
     I_relay = I_perfect * noise_mag_I;
     

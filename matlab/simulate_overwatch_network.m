@@ -1,45 +1,40 @@
-function sensor_data = simulate_overwatch_network(actual_fault_dist, actual_fault_type)
+function [sensor_data, max_noise_pct] = simulate_overwatch_network(actual_fault_dist, actual_fault_type)
 % SIMULATE_OVERWATCH_NETWORK
-% Generates the readings for all Overwatch units based on a specific fault.
-% NOW INCLUDES: +/- 1% Sensor Noise
+% Returns: sensor_data, and the Maximum Noise % applied in this specific trial.
 
-    % 1. Load System Config to get Unit Locations
     sys = get_system_config();
     unit_locs = sys.unit_locations_km;
     num_units = length(unit_locs);
     
-    % 2. Calculate the Fault Current at the epicenter
-    % We use the engine we built earlier
-    % Hardcoded 0 ohms for Rf as per your previous version
     I_fault_vector = calculate_fault_current(actual_fault_dist, actual_fault_type, 0);
-    
-    % 3. Determine what each unit sees (The Radial Logic)
     readings = zeros(num_units, 3);
     
-    % Define Noise Level (1% = 0.01)
-    NOISE_LIMIT = 0.01; 
+    % --- NOISE CONFIGURATION ---
+    % Using specific deviation data (5.0A ref)
+    std_amps = 0.01212453521; % Update this every now and then
+    SENSOR_STD = std_amps / 5.0; 
     
+    max_noise_pct = 0; % Track the worst noise in this specific run
+
     for i = 1:num_units
         u_dist = unit_locs(i);
         
         if u_dist < actual_fault_dist
-            % Unit is UPSTREAM of the fault -> It sees the fault current
+            % UPSTREAM
+            % Generate random noise vector
+            raw_noise = SENSOR_STD * randn(1, 3);
+            noise_factors = 1 + raw_noise;
             
-            % --- NOISE INJECTION START ---
-            % Generate random noise for 3 phases: Range [-1% to +1%]
-            % Formula: (2*rand - 1) gives range [-1, 1]
-            noise_factors = 1 + (NOISE_LIMIT * (2*rand(1, 3) - 1));
+            % Capture the max absolute noise % for reporting
+            current_max = max(abs(raw_noise)) * 100;
+            if current_max > max_noise_pct
+                max_noise_pct = current_max;
+            end
             
-            % Apply noise to the perfect vector
-            % FIX: Transpose I_fault_vector (3x1) to (1x3) to match noise_factors
             readings(i, :) = I_fault_vector.' .* noise_factors;
-            % --- NOISE INJECTION END ---
-            
-            status = 'ACTIVE'; % Kept for consistency with your snippet
         else
-            % Unit is DOWNSTREAM -> It sees 0 (or negligible load)
+            % DOWNSTREAM
             readings(i, :) = [0, 0, 0]; 
-            status = 'IDLE';   % Kept for consistency with your snippet
         end
     end
     
