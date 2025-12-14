@@ -2,7 +2,7 @@
 clear; clc;
 
 % --- INPUTS (Change these to test!) ---
-TEST_FAULT_LOC_KM = 5;   % Let's put a fault at 6.45 km
+TEST_FAULT_LOC_KM = 8;   % Let's put a fault at 6.45 km
 TEST_FAULT_TYPE = 1;        % 1=SLG (Phase A)
 
 fprintf('========================================\n');

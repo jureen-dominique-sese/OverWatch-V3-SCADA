@@ -1,439 +1,1209 @@
 """
-Overwatch SCADA 2025 - IEEE 13 Node Test Feeder Edition
-Integrated with MATLAB Simulation Logic
+Tactical SCADA Dashboard - IEEE 13 Node Test Feeder
+Real-time Google Sheets Integration with Leaflet Simple CRS
 """
-import webview
-import json
-import random
-import math
-import cmath
-import numpy as np
-from datetime import datetime, timedelta
 
-# --- 1. SIMULATION ENGINE (Ported from MATLAB) ---
+import webview
+import requests
+import csv
+import io
+from datetime import datetime
+import json
+import math
+import threading
+import time
+
+# ============================================================================
+# POWER SYSTEM PHYSICS ENGINE
+# ============================================================================
 
 class PowerSystem:
+    """
+    IEEE 13 Node Test Feeder - Fault Current Calculator
+    Based on sequence impedance matrices from get_system_config.m
+    """
+    
     def __init__(self):
-        # Configuration from get_system_config.m
-        self.V_LL = 13200           # 13.2 kV
-        self.S_base = 5e6           # 5 MVA
+        # System parameters
+        self.V_LL = 13200  # Line-to-Line Voltage (V)
+        self.S_base = 5e6  # Base MVA
+        self.F_Hz = 60
         self.V_LN = self.V_LL / math.sqrt(3)
         self.I_base = self.S_base / (math.sqrt(3) * self.V_LL)
-        self.Z_base = (self.V_LL**2) / self.S_base
+        self.Z_base = (self.V_LL ** 2) / self.S_base
         
-        # Source Impedance (Stiff Source)
+        # Source impedance (250 MVA short circuit capacity)
         MVA_SC = 250e6
-        Z_src_mag = self.S_base / MVA_SC
-        self.Z_source = Z_src_mag * complex(0.1, 0.99)
+        Z_source_mag = self.S_base / MVA_SC
+        self.Z_source = complex(0.1 * Z_source_mag, 0.99 * Z_source_mag)
         
-        # Line Impedance (Ohms/km converted to PU)
-        R1_ohm = 0.19; X1_ohm = 0.40
-        R0_ohm = 0.50; X0_ohm = 1.20
-        self.z1_pu_km = complex(R1_ohm, X1_ohm) / self.Z_base
-        self.z0_pu_km = complex(R0_ohm, X0_ohm) / self.Z_base
+        # Line impedances per km (from get_system_config.m)
+        R1_ohm_km = 0.19
+        X1_ohm_km = 0.40
+        self.z1_pu_km = complex(R1_ohm_km, X1_ohm_km) / self.Z_base
         
-        # Database for Lookup
-        self.db_SLG = []
-        self.db_LL = []
-        self.db_3PH = []
-        self.generate_database()
-
-    def calculate_current(self, dist_km, type_idx, rf_ohm=0):
-        # 1=SLG, 2=LL, 3=3PH
-        Z1_tot = self.Z_source + (self.z1_pu_km * dist_km)
-        Z2_tot = Z1_tot
-        Z0_tot = self.Z_source + (self.z0_pu_km * dist_km)
-        Rf_pu = rf_ohm / self.Z_base
-        V_f = 1.0 # 1.0 pu
-        a = cmath.exp(complex(0, 2*math.pi/3)) # 120 deg operator
+        # IEEE 13 Node estimated line lengths (km)
+        self.line_lengths = {
+            '650-632': 2.0,
+            '632-633': 1.8,
+            '632-645': 1.5,
+            '632-671': 2.2,
+            '645-646': 1.0,
+            '671-680': 2.8,
+            '671-684': 1.4,
+            '684-611': 1.0,
+            '684-652': 1.2,
+            '633-634': 0.6
+        }
+    
+    def calculate_fault_current(self, bus_name, fault_type='3LG'):
+        """
+        Calculate fault current at specified bus
         
-        I0 = I1 = I2 = 0j
+        Args:
+            bus_name: Bus number (e.g., '632', '671')
+            fault_type: '3LG', 'SLG', 'LL', 'LLG'
         
-        if type_idx == 1: # SLG (Phase A)
-            denom = Z1_tot + Z2_tot + Z0_tot + (3 * Rf_pu)
-            I1 = V_f / denom
-            I2 = I1
-            I0 = I1
-        elif type_idx == 2: # LL (Phase B-C)
-            I1 = V_f / (Z1_tot + Z2_tot + Rf_pu)
-            I2 = -I1
-            I0 = 0j
-        elif type_idx == 3: # 3PH
-            I1 = V_f / (Z1_tot + Rf_pu)
-            I2 = 0j
-            I0 = 0j
-            
-        # Symmetrical Components to Phase Currents
-        # [Ia; Ib; Ic] = A * [I0; I1; I2]
-        Ia = I0 + I1 + I2
-        Ib = I0 + (a**2)*I1 + a*I2
-        Ic = I0 + a*I1 + (a**2)*I2
+        Returns:
+            dict with magnitude (A), severity, impedance
+        """
+        # Get path impedance from substation to fault
+        Z_path = self._get_path_impedance(bus_name)
+        Z_total = self.Z_source + Z_path
         
-        # Convert to Amps
-        return [abs(Ia)*self.I_base, abs(Ib)*self.I_base, abs(Ic)*self.I_base]
-
-    def generate_database(self):
-        print("⚡ Generating Physics Lookup Table...")
-        # Generate 0.01 to 10.0 km
-        dist = np.arange(0.01, 10.0, 0.01)
-        for d in dist:
-            i_slg = self.calculate_current(d, 1)
-            i_ll  = self.calculate_current(d, 2)
-            i_3ph = self.calculate_current(d, 3)
-            
-            # Storing [dist, Ia, Ib, Ic]
-            self.db_SLG.append([d, i_slg[0], i_slg[1], i_slg[2]])
-            self.db_LL.append([d, i_ll[0], i_ll[1], i_ll[2]])
-            self.db_3PH.append([d, i_3ph[0], i_3ph[1], i_3ph[2]])
-        print("✓ Physics Engine Ready")
-
-    def locate_fault(self, readings, sensor_km):
-        # readings: [Ia, Ib, Ic] from the active sensor
-        # sensor_km: location of that sensor
-        
-        I_max = max(readings)
-        if I_max < 50: return None # No fault
-        
-        Ia, Ib, Ic = readings
-        
-        # Classification Logic (same as MATLAB)
-        f_type = "Unknown"
-        search_db = []
-        target_val = 0
-        col_idx = 0 # 0=Dist, 1=Ia, 2=Ib, 3=Ic
-        
-        if Ia > 0.5*I_max and Ib < 0.2*I_max and Ic < 0.2*I_max:
-            f_type = "Single Line-to-Ground (Phase A)"
-            search_db = self.db_SLG
-            target_val = Ia
-            col_idx = 1
-        elif Ia < 0.2*I_max and Ib > 0.8*I_max and Ic > 0.8*I_max:
-            f_type = "Line-to-Line (Phase B-C)"
-            search_db = self.db_LL
-            target_val = Ib
-            col_idx = 2
-        elif Ia > 0.9*I_max and Ib > 0.9*I_max and Ic > 0.9*I_max:
-            f_type = "Three-Phase Balanced"
-            search_db = self.db_3PH
-            target_val = Ia
-            col_idx = 1
+        # Fault current in per-unit
+        if abs(Z_total) < 1e-6:
+            I_fault_pu = 0
         else:
-            f_type = "Uncertain (Assumed SLG)"
-            search_db = self.db_SLG
-            target_val = I_max
-            col_idx = 1
-            
-        # Pinpoint Location (Inverse Lookup)
-        best_dist = 0
-        min_diff = float('inf')
+            I_fault_pu = 1.0 / abs(Z_total)
         
-        for row in search_db:
-            if row[0] < sensor_km: continue # Fault must be downstream
-            diff = abs(row[col_idx] - target_val)
-            if diff < min_diff:
-                min_diff = diff
-                best_dist = row[0]
-                
+        # Convert to actual amperes
+        I_fault_A = I_fault_pu * self.I_base
+        
+        # Determine severity
+        if I_fault_A > 8000:
+            severity = "CRITICAL"
+        elif I_fault_A > 5000:
+            severity = "WARNING"
+        elif I_fault_A > 3000:
+            severity = "CAUTION"
+        else:
+            severity = "INFO"
+        
         return {
-            "status": "FAULT CONFIRMED",
-            "type": f_type,
-            "dist": best_dist,
-            "amps": target_val
+            'magnitude': round(I_fault_A, 2),
+            'severity': severity,
+            'impedance_pu': round(abs(Z_total), 4),
+            'type': fault_type,
+            'voltage_drop_pct': round((I_fault_pu * abs(Z_path)) * 100, 2)
         }
+    
+    def _get_path_impedance(self, bus_name):
+        """Calculate total impedance from Bus 650 to target bus"""
+        # Network tree paths
+        paths = {
+            '650': [],
+            '632': ['650-632'],
+            '633': ['650-632', '632-633'],
+            '634': ['650-632', '632-633', '633-634'],
+            '645': ['650-632', '632-645'],
+            '646': ['650-632', '632-645', '645-646'],
+            '671': ['650-632', '632-671'],
+            '680': ['650-632', '632-671', '671-680'],
+            '684': ['650-632', '632-671', '671-684'],
+            '611': ['650-632', '632-671', '671-684', '684-611'],
+            '652': ['650-632', '632-671', '671-684', '684-652']
+        }
+        
+        path = paths.get(bus_name, [])
+        Z_total = complex(0, 0)
+        
+        for segment in path:
+            length_km = self.line_lengths.get(segment, 1.0)
+            Z_total += self.z1_pu_km * length_km
+        
+        return Z_total
 
-# --- 2. API & STATE MANAGEMENT ---
 
-class Api:
+# ============================================================================
+# TOPOLOGY MANAGER
+# ============================================================================
+
+class MapManager:
+    """
+    IEEE 13 Node topology with exact coordinate placement
+    Coordinates match physics simulation in get_system_config.m
+    """
+    
     def __init__(self):
-        self.sys = PowerSystem()
-        self.faults = []
-        self.init_ieee13_map()
-        
-    def init_ieee13_map(self):
-        # Base Lat/Lng (Bicol - Pili/Naga area for correlation)
-        base_lat = 13.554725
-        base_lng = 123.274724
-        
-        # Scaling factor (approx meters to deg)
-        s = 0.000009 
-        
-        # Node Distances (from Node 650) & Layout coordinates
-        # We manually map the IEEE 13 tree structure to X,Y offsets (meters)
-        # 650 (0,0) -> 632 (East 600m)
-        # 632 -> 671 (East 600m) -> 680 (South 300m)
-        # ... etc
-        
+        # Fixed anchor coordinates (X, Y)
         self.nodes = {
-            "650": {"lat": base_lat, "lng": base_lng, "dist_km": 0.0, "name": "Substation"},
-            "632": {"lat": base_lat, "lng": base_lng + 600*s, "dist_km": 0.61, "name": "Node 632"}, # 2000ft
-            "645": {"lat": base_lat + 150*s, "lng": base_lng + 750*s, "dist_km": 0.76, "name": "Node 645"},
-            "646": {"lat": base_lat + 240*s, "lng": base_lng + 750*s, "dist_km": 0.85, "name": "Node 646"},
-            "633": {"lat": base_lat - 150*s, "lng": base_lng + 600*s, "dist_km": 0.76, "name": "Node 633"},
-            "634": {"lat": base_lat - 300*s, "lng": base_lng + 600*s, "dist_km": 0.76, "name": "XFM-1"}, # 0 dist from 633
-            "671": {"lat": base_lat, "lng": base_lng + 1200*s, "dist_km": 1.22, "name": "Node 671"}, # 2000ft from 632
-            "680": {"lat": base_lat - 300*s, "lng": base_lng + 1200*s, "dist_km": 1.52, "name": "Node 680"},
-            "684": {"lat": base_lat + 90*s, "lng": base_lng + 1200*s, "dist_km": 1.31, "name": "Node 684"},
-            "611": {"lat": base_lat + 90*s, "lng": base_lng + 1290*s, "dist_km": 1.40, "name": "Node 611"},
-            "652": {"lat": base_lat + 330*s, "lng": base_lng + 1200*s, "dist_km": 1.55, "name": "Node 652"},
-            "692": {"lat": base_lat, "lng": base_lng + 1200*s, "dist_km": 1.22, "name": "Switch"}, # At 671
-            "675": {"lat": base_lat, "lng": base_lng + 1350*s, "dist_km": 1.37, "name": "Node 675"}
+            '650': {'x': 0, 'y': 0, 'type': 'substation', 'voltage': 115, 'name': 'Substation'},
+            '680': {'x': 0, 'y': 5290, 'type': 'load', 'voltage': 13.2, 'name': 'End Node'},
+            '646': {'x': 1215, 'y': 3005, 'type': 'load', 'voltage': 13.2, 'name': 'Load 646'},
+            '634': {'x': -1905, 'y': 3005, 'type': 'transformer', 'voltage': 13.2, 'name': 'XFM-1'},
+            
+            # Interpolated intermediate nodes
+            '632': {'x': 0, 'y': 2000, 'type': 'junction', 'voltage': 13.2, 'name': 'Junction 632'},
+            '633': {'x': -950, 'y': 3005, 'type': 'junction', 'voltage': 13.2, 'name': 'Junction 633'},
+            '645': {'x': 600, 'y': 3005, 'type': 'junction', 'voltage': 13.2, 'name': 'Junction 645'},
+            '671': {'x': 0, 'y': 3500, 'type': 'junction', 'voltage': 13.2, 'name': 'Junction 671'},
+            '684': {'x': 800, 'y': 4200, 'type': 'junction', 'voltage': 13.2, 'name': 'Junction 684'},
+            '611': {'x': 1400, 'y': 4500, 'type': 'load', 'voltage': 13.2, 'name': 'Load 611'},
+            '652': {'x': 1200, 'y': 4800, 'type': 'load', 'voltage': 13.2, 'name': 'Load 652'}
         }
         
-        # Define Connectivity
-        self.lines = [
-            ["650", "632"], ["632", "645"], ["645", "646"],
-            ["632", "633"], ["633", "634"], ["632", "671"],
-            ["671", "680"], ["671", "684"], ["684", "611"],
-            ["684", "652"], ["671", "692"], ["692", "675"]
+        # Network connections (edges)
+        self.connections = [
+            ['650', '632'],
+            ['632', '633'],
+            ['632', '645'],
+            ['632', '671'],
+            ['633', '634'],
+            ['645', '646'],
+            ['671', '680'],
+            ['671', '684'],
+            ['684', '611'],
+            ['684', '652']
         ]
-        
-        # Overwatch Units (Matching MATLAB config logic but mapped to IEEE nodes)
-        # Unit 1: Source (650), Unit 2: Node 632, Unit 3: Node 671
-        self.sensors = [
-            {"id": "U1", "node": "650", "km": 0.0},
-            {"id": "U2", "node": "632", "km": 0.61},
-            {"id": "U3", "node": "671", "km": 1.22}
-        ]
-
-    def get_map_data(self):
+    
+    def get_topology(self):
+        """Return complete topology for frontend"""
         return {
-            "nodes": self.nodes,
-            "lines": self.lines,
-            "sensors": self.sensors
+            'nodes': self.nodes,
+            'connections': self.connections
         }
 
-    def simulate_fault(self, node_id, fault_type_idx):
+
+# ============================================================================
+# GOOGLE SHEETS DATA CONNECTOR
+# ============================================================================
+
+class DataConnector:
+    """
+    Fetches live fault data from Google Sheets
+    Silently refreshes every 1 second
+    """
+    
+    def __init__(self, sheet_id, sheet_name):
+        self.sheet_id = sheet_id
+        self.sheet_name = sheet_name
+        self.cache = []
+        self.last_fetch = None
+    
+    def fetch_data(self):
         """
-        Runs the full MATLAB-equivalent simulation chain.
-        1. Get physics distance of node.
-        2. Calculate currents.
-        3. Add noise.
-        4. Run Locator Algorithm.
+        Fetch data from Google Sheets via CSV export
+        
+        Column mapping (UPDATED):
+        - ReportID (A) -> id
+        - Date (B) -> date
+        - Time (C) -> time
+        - Lat(x) (D) -> x (map X coordinate)
+        - Long(y) (E) -> y (map Y coordinate)
+        - Fault Type (F) -> fault_type
+        - Modified By (G) -> modified_by
+        - Status (H) -> status
         """
+        url = f"https://docs.google.com/spreadsheets/d/{self.sheet_id}/gviz/tq?tqx=out:csv&sheet={self.sheet_name}"
+        
         try:
-            node = self.nodes[node_id]
-            actual_km = node['dist_km']
+            response = requests.get(url, timeout=3)
+            response.raise_for_status()
             
-            # A. PHYSICS SIMULATION (simulate_overwatch_network.m)
-            # Find closest upstream unit to define what currents are seen
-            active_sensor = None
-            closest_dist = -1
+            reader = csv.DictReader(io.StringIO(response.text))
+            data = []
             
-            for s in self.sensors:
-                if s['km'] <= actual_km and s['km'] > closest_dist:
-                    active_sensor = s
-                    closest_dist = s['km']
+            for row in reader:
+                try:
+                    # Parse columns correctly
+                    report_id = row.get('ReportID', 'UNKNOWN').strip()
+                    
+                    # CORRECTED: Get X from Lat(x) column and Y from Long(y) column
+                    x_coord = float(row.get('Lat(x)', 0))  # This is X on the map
+                    y_coord = float(row.get('Long(y)', 0))  # This is Y on the map
+                    
+                    fault_type = row.get('Fault Type', '').strip()
+                    status = row.get('Status', '').strip().upper() if row.get('Status') else 'ACTIVE FAULT'
+                    
+                    fault = {
+                        'id': report_id,
+                        'date': row.get('Date', datetime.now().strftime('%Y-%m-%d')),
+                        'time': row.get('Time', datetime.now().strftime('%H:%M:%S')),
+                        'device': 'SimDev',  # Default device name
+                        'x': x_coord,  # Map X coordinate
+                        'y': y_coord,  # Map Y coordinate
+                        'distance': 0,  # Can be calculated if needed
+                        'fault_type': fault_type,
+                        'status': status if status else 'ACTIVE FAULT',
+                        'modified_by': row.get('Modified By', '').strip(),
+                        'timestamp': datetime.now().isoformat()
+                    }
+                    
+                    # Determine severity from fault type
+                    if 'LLG' in fault_type or 'Phase B-C' in fault_type:
+                        fault['severity'] = 'CRITICAL'
+                    elif 'SLG' in fault_type or 'Phase A' in fault_type:
+                        fault['severity'] = 'WARNING'
+                    else:
+                        fault['severity'] = 'INFO'
+                    
+                    # Override severity based on status
+                    if status == 'RESOLVED':
+                        fault['severity'] = 'INFO'
+                    elif status == 'ACTIVE FAULT':
+                        # Keep the severity from fault type
+                        pass
+                    
+                    data.append(fault)
+                    
+                except (ValueError, KeyError) as e:
+                    print(f"⚠ Row parse error: {e}")
+                    print(f"   Row data: {row}")
+                    continue
             
-            if not active_sensor:
-                return {"error": "Fault upstream of all sensors"}
-                
-            # Calculate perfect currents
-            I_real = self.sys.calculate_current(actual_km, int(fault_type_idx))
-            
-            # Inject Noise (+/- 1%)
-            noise = [1.0 + 0.01*random.uniform(-1, 1) for _ in range(3)]
-            I_sensed = [I_real[i] * noise[i] for i in range(3)]
-            
-            # B. CPU ALGORITHM (cpu_fault_locator.m)
-            result = self.sys.locate_fault(I_sensed, active_sensor['km'])
-            
-            if not result:
-                return {"error": "Fault current too low to detect"}
-                
-            # C. CREATE REPORT
-            new_id = f"FLT-{random.randint(1000,9999)}"
-            report = {
-                "id": new_id,
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "time": datetime.now().strftime("%H:%M:%S"),
-                "device": f"Sensor {active_sensor['id']} ({active_sensor['node']})",
-                "dist": round(result['dist'] * 1000, 2), # km to meters
-                "lat": node['lat'], # In real life we'd calculate lat/lng from dist
-                "lng": node['lng'], # mapping back to the node for viz
-                "sev": "CRITICAL" if result['amps'] > 8000 else "WARNING",
-                "status": "Pending",
-                "type": result['type'],
-                "amps": round(result['amps'], 2)
-            }
-            
-            self.faults.append(report)
-            return {"success": True, "report": report}
+            self.cache = data
+            self.last_fetch = datetime.now()
+            return data
             
         except Exception as e:
-            return {"error": str(e)}
+            print(f"⚠ Fetch error: {e}")
+            return self.cache
 
+# ============================================================================
+# PYWEBVIEW API BRIDGE
+# ============================================================================
+
+class Api:
+    """
+    Python API exposed to JavaScript frontend
+    Handles real-time data updates and simulation
+    """
+    
+    def __init__(self):
+        self.power_system = PowerSystem()
+        self.map_manager = MapManager()
+        self.data_connector = DataConnector(
+            sheet_id="1UTQUNv0z8m293VNw5tuJzkcxGnbNuV4zUYSV0MsrOQw",
+            sheet_name="inputLog"
+        )
+        self.auto_refresh = True
+    
+    def get_topology(self):
+        """Return IEEE 13 node topology"""
+        return self.map_manager.get_topology()
+    
     def get_faults(self):
-        # Return local list instead of Google Sheets for this demo
-        return self.faults
-
-    def get_stats(self):
-        return {
-            "total": len(self.faults),
-            "crit": len([f for f in self.faults if f['sev'] == 'CRITICAL']),
-            "warn": len([f for f in self.faults if f['sev'] == 'WARNING']),
-            "devs": {} # Simplified
-        }
+        """Fetch current fault data (called repeatedly by frontend)"""
+        return self.data_connector.fetch_data()
+    
+    def simulate_fault(self, bus_name, fault_type='3LG'):
+        """
+        Generate simulated fault for testing
         
-    def ack_fault(self, rid, status, name):
-        for f in self.faults:
-            if f['id'] == rid:
-                f['status'] = status
-                f['ack'] = True
-                f['mod'] = name
-                return {"ok": True}
-        return {"ok": False, "err": "Not found"}
+        Args:
+            bus_name: Bus number (e.g., '632')
+            fault_type: Fault type ('3LG', 'SLG', etc.)
+        """
+        result = self.power_system.calculate_fault_current(bus_name, fault_type)
+        
+        # Get bus coordinates
+        node = self.map_manager.nodes.get(bus_name, {'x': 0, 'y': 0})
+        
+        return {
+            'id': f'SIM-{bus_name}-{datetime.now().strftime("%H%M%S")}',
+            'date': datetime.now().strftime('%Y-%m-%d'),
+            'time': datetime.now().strftime('%H:%M:%S'),
+            'device': f'Bus {bus_name}',
+            'x': node['x'],
+            'y': node['y'],
+            'distance': 0,
+            'status': 'SIMULATED',
+            'severity': result['severity'],
+            'fault_current': result['magnitude'],
+            'impedance': result['impedance_pu'],
+            'voltage_drop': result['voltage_drop_pct'],
+            'fault_type': fault_type
+        }
+    
+    def get_system_status(self):
+        """Return overall system health metrics"""
+        faults = self.data_connector.cache
+        
+        critical = sum(1 for f in faults if f.get('severity') == 'CRITICAL')
+        warnings = sum(1 for f in faults if f.get('severity') == 'WARNING')
+        
+        return {
+            'total_faults': len(faults),
+            'critical': critical,
+            'warnings': warnings,
+            'system_voltage': 13.2,
+            'frequency': 60.0,
+            'last_update': self.data_connector.last_fetch.isoformat() if self.data_connector.last_fetch else None,
+            'timestamp': datetime.now().isoformat()
+        }
+    
+    def get_bus_list(self):
+        """Return list of all buses for simulation dropdown"""
+        return list(self.map_manager.nodes.keys())
 
-# --- 3. FRONTEND (HTML/JS) ---
+
+# ============================================================================
+# HTML FRONTEND WITH TACTICAL HUD
+# ============================================================================
 
 HTML = """<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>Overwatch IEEE 13</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
-<style>
-:root{--bg:#1e1e1e;--panel:#252526;--text:#ccc;--accent:#007acc;--crit:#f48771;--warn:#cca700;--ok:#89d185}
-body{margin:0;background:var(--bg);color:var(--text);font-family:'Segoe UI',sans-serif;height:100vh;display:flex;flex-direction:column}
-.head{height:48px;background:var(--panel);border-bottom:1px solid #333;display:flex;align-items:center;padding:0 20px;gap:20px}
-.main{flex:1;display:flex;overflow:hidden}
-#map{flex:1;background:#111}
-.side{width:320px;background:var(--panel);border-left:1px solid #333;padding:20px;display:flex;flex-direction:column;gap:15px;overflow-y:auto}
-.box{background:#333;padding:12px;border-radius:4px;font-size:12px}
-.btn{width:100%;padding:8px;background:var(--accent);color:#fff;border:none;border-radius:3px;cursor:pointer;margin-top:5px}
-.btn:hover{opacity:0.9}
-.btn.sim{background:#d35400}
-select, input{width:100%;padding:6px;background:#1e1e1e;border:1px solid #444;color:#fff;margin:5px 0}
-.pulse{width:14px;height:14px;border-radius:50%;background:var(--crit);box-shadow:0 0 0 0 rgba(244,135,113,0.7);animation:p 1.5s infinite}
-@keyframes p{0%{box-shadow:0 0 0 0 rgba(244,135,113,0.7)}70%{box-shadow:0 0 0 10px rgba(244,135,113,0)}100%{box-shadow:0 0 0 0 rgba(244,135,113,0)}}
-.node-icon{width:10px;height:10px;background:#888;border-radius:50%;border:2px solid #fff}
-.sensor-icon{font-size:14px}
-</style>
-</head><body>
-
-<div class="head">
-    <div style="font-weight:bold;color:var(--accent)">⚡ Overwatch SCADA</div>
-    <div style="font-size:12px;color:#888">IEEE 13 Node Test Feeder Integration</div>
-</div>
-
-<div class="main">
-    <div id="map"></div>
-    <div class="side">
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>TACTICAL SCADA - IEEE 13 Node</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Share Tech Mono', monospace;
+        }
         
-        <div>
-            <h3 style="margin:0 0 10px 0;color:var(--accent)">🎮 Simulation Control</h3>
-            <div class="box">
-                <label>Target Node</label>
-                <select id="sim-node"></select>
-                <label>Fault Type</label>
-                <select id="sim-type">
-                    <option value="1">Single Line-to-Ground (A)</option>
-                    <option value="2">Line-to-Line (B-C)</option>
-                    <option value="3">Three-Phase</option>
-                </select>
-                <button class="btn sim" onclick="runSim()">⚡ Inject Fault</button>
+        body {
+            background: #0b0c10;
+            color: #66fcf1;
+            overflow: hidden;
+        }
+        
+        /* ===== MAP WITH TACTICAL GRID ===== */
+        #map {
+            width: 100%;
+            height: 100vh;
+            background: 
+                linear-gradient(0deg, rgba(102, 252, 241, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(102, 252, 241, 0.03) 1px, transparent 1px);
+            background-size: 100px 100px;
+            background-color: #0b0c10;
+        }
+        
+        /* ===== SCANLINE OVERLAY ===== */
+        #map::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: repeating-linear-gradient(
+                0deg,
+                rgba(0, 0, 0, 0.1),
+                rgba(0, 0, 0, 0.1) 1px,
+                transparent 1px,
+                transparent 3px
+            );
+            pointer-events: none;
+            z-index: 1000;
+            animation: scanline 10s linear infinite;
+        }
+        
+        @keyframes scanline {
+            0% { transform: translateY(0); }
+            100% { transform: translateY(100px); }
+        }
+        
+        /* ===== VIGNETTE EFFECT ===== */
+        #map::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            box-shadow: inset 0 0 200px rgba(0, 0, 0, 0.9);
+            pointer-events: none;
+            z-index: 999;
+        }
+        
+        /* ===== HUD CORNER BRACKETS ===== */
+        .hud-corner {
+            position: fixed;
+            width: 50px;
+            height: 50px;
+            border: 3px solid #66fcf1;
+            z-index: 2000;
+            pointer-events: none;
+            box-shadow: 0 0 10px #66fcf1;
+        }
+        
+        .hud-corner.tl {
+            top: 20px;
+            left: 20px;
+            border-right: none;
+            border-bottom: none;
+        }
+        
+        .hud-corner.tr {
+            top: 20px;
+            right: 20px;
+            border-left: none;
+            border-bottom: none;
+        }
+        
+        .hud-corner.bl {
+            bottom: 20px;
+            left: 20px;
+            border-right: none;
+            border-top: none;
+        }
+        
+        .hud-corner.br {
+            bottom: 20px;
+            right: 20px;
+            border-left: none;
+            border-top: none;
+        }
+        
+        /* ===== TARGETING CROSSHAIR ===== */
+        .crosshair {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 80px;
+            height: 80px;
+            border: 2px solid rgba(102, 252, 241, 0.4);
+            border-radius: 50%;
+            z-index: 1500;
+            pointer-events: none;
+        }
+        
+        .crosshair::before,
+        .crosshair::after {
+            content: '';
+            position: absolute;
+            background: rgba(102, 252, 241, 0.4);
+        }
+        
+        .crosshair::before {
+            top: 50%;
+            left: 0;
+            width: 100%;
+            height: 2px;
+            transform: translateY(-50%);
+        }
+        
+        .crosshair::after {
+            left: 50%;
+            top: 0;
+            width: 2px;
+            height: 100%;
+            transform: translateX(-50%);
+        }
+        
+        .crosshair-center {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 6px;
+            height: 6px;
+            background: #66fcf1;
+            border-radius: 50%;
+            box-shadow: 0 0 10px #66fcf1;
+        }
+        
+        /* ===== TOP HUD BAR ===== */
+        .hud-top {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 400px;
+            height: 70px;
+            background: rgba(11, 12, 16, 0.95);
+            border-bottom: 2px solid #66fcf1;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 80px;
+            z-index: 2000;
+        }
+        
+        .hud-title {
+            font-size: 24px;
+            color: #66fcf1;
+            text-shadow: 0 0 15px #66fcf1;
+            letter-spacing: 4px;
+            animation: pulse-glow 2s ease-in-out infinite;
+        }
+        
+        @keyframes pulse-glow {
+            0%, 100% { text-shadow: 0 0 15px #66fcf1; }
+            50% { text-shadow: 0 0 25px #66fcf1, 0 0 35px #66fcf1; }
+        }
+        
+        .hud-status {
+            display: flex;
+            gap: 30px;
+            font-size: 13px;
+        }
+        
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            animation: blink 1.5s ease-in-out infinite;
+        }
+        
+        .status-dot.online {
+            background: #00ff41;
+            box-shadow: 0 0 10px #00ff41;
+        }
+        
+        .status-dot.critical {
+            background: #ff4d4d;
+            box-shadow: 0 0 10px #ff4d4d;
+        }
+        
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        
+        /* ===== RIGHT SIDE PANEL (LIVE FEED) ===== */
+        .side-panel {
+            position: fixed;
+            top: 0;
+            right: 0;
+            width: 400px;
+            height: 100vh;
+            background: rgba(11, 12, 16, 0.98);
+            border-left: 2px solid #66fcf1;
+            z-index: 2000;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        
+        .panel-header {
+            padding: 20px;
+            border-bottom: 2px solid #66fcf1;
+            font-size: 16px;
+            letter-spacing: 2px;
+            text-align: center;
+            color: #66fcf1;
+            text-shadow: 0 0 10px #66fcf1;
+        }
+        
+        .live-feed {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .feed-item {
+            background: rgba(102, 252, 241, 0.05);
+            border-left: 3px solid #66fcf1;
+            padding: 12px;
+            font-size: 11px;
+            line-height: 1.6;
+            animation: slide-in 0.3s ease-out;
+        }
+        
+        .feed-item.critical {
+            border-left-color: #ff4d4d;
+            background: rgba(255, 77, 77, 0.1);
+        }
+        
+        .feed-item.warning {
+            border-left-color: #ffa500;
+            background: rgba(255, 165, 0, 0.1);
+        }
+        
+        @keyframes slide-in {
+            from {
+                opacity: 0;
+                transform: translateX(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+        
+        .feed-item-id {
+            font-weight: bold;
+            color: #66fcf1;
+            margin-bottom: 5px;
+        }
+        
+        .feed-item-coord {
+            color: #00ff41;
+            font-family: monospace;
+        }
+        
+        /* ===== SIMULATION PANEL ===== */
+        .sim-panel {
+            padding: 20px;
+            border-top: 2px solid #66fcf1;
+            background: rgba(11, 12, 16, 1);
+        }
+        
+        .sim-panel h3 {
+            font-size: 14px;
+            margin-bottom: 15px;
+            color: #66fcf1;
+            letter-spacing: 2px;
+        }
+        
+        .sim-control {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .sim-select {
+            padding: 10px;
+            background: rgba(102, 252, 241, 0.1);
+            border: 1px solid #66fcf1;
+            color: #66fcf1;
+            font-family: 'Share Tech Mono', monospace;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        
+        .sim-select option {
+            background: #0b0c10;
+        }
+        
+        .sim-btn {
+            padding: 12px;
+            background: #66fcf1;
+            color: #0b0c10;
+            border: none;
+            font-family: 'Share Tech Mono', monospace;
+            font-size: 12px;
+            font-weight: bold;
+            cursor: pointer;
+            letter-spacing: 2px;
+            transition: all 0.3s;
+        }
+        
+        .sim-btn:hover {
+            background: #00ff41;
+            box-shadow: 0 0 20px #00ff41;
+        }
+        
+        .sim-btn:active {
+            transform: scale(0.95);
+        }
+        
+        /* ===== BOTTOM STATUS BAR ===== */
+        .status-bar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 400px;
+            height: 40px;
+            background: rgba(11, 12, 16, 0.95);
+            border-top: 2px solid #66fcf1;
+            display: flex;
+            align-items: center;
+            padding: 0 80px;
+            gap: 30px;
+            font-size: 11px;
+            z-index: 2000;
+        }
+        
+        .coord-display {
+            color: #00ff41;
+            font-family: monospace;
+        }
+        
+        /* ===== CUSTOM LEAFLET STYLES ===== */
+        .leaflet-container {
+            background: transparent !important;
+        }
+        
+        .leaflet-popup-content-wrapper {
+            background: rgba(11, 12, 16, 0.95);
+            color: #66fcf1;
+            border: 2px solid #66fcf1;
+            box-shadow: 0 0 20px rgba(102, 252, 241, 0.5);
+            font-family: 'Share Tech Mono', monospace;
+            font-size: 12px;
+        }
+        
+        .leaflet-popup-tip {
+            background: rgba(11, 12, 16, 0.95);
+            border: 2px solid #66fcf1;
+        }
+        
+        /* ===== SCROLLBAR ===== */
+        .live-feed::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        .live-feed::-webkit-scrollbar-track {
+            background: rgba(102, 252, 241, 0.05);
+        }
+        
+        .live-feed::-webkit-scrollbar-thumb {
+            background: #66fcf1;
+            border-radius: 4px;
+        }
+        
+        .live-feed::-webkit-scrollbar-thumb:hover {
+            background: #00ff41;
+        }
+    </style>
+</head>
+<body>
+    <!-- HUD CORNER BRACKETS -->
+    <div class="hud-corner tl"></div>
+    <div class="hud-corner tr"></div>
+    <div class="hud-corner bl"></div>
+    <div class="hud-corner br"></div>
+    
+    <!-- TARGETING CROSSHAIR -->
+    <div class="crosshair">
+        <div class="crosshair-center"></div>
+    </div>
+    
+    <!-- TOP HUD BAR -->
+    <div class="hud-top">
+        <div class="hud-title">⚡ TACTICAL SCADA - IEEE 13</div>
+        <div class="hud-status">
+            <div class="status-item">
+                <div class="status-dot online"></div>
+                <span>SYSTEM: <span id="system-status">ONLINE</span></span>
             </div>
-        </div>
-
-        <div id="result-box" style="display:none">
-            <h3 style="margin:0 0 10px 0">📋 Detection Report</h3>
-            <div class="box">
-                <div id="res-status" style="font-weight:bold;color:var(--crit)"></div>
-                <div id="res-detail"></div>
+            <div class="status-item">
+                <span>VOLTAGE: <span id="voltage-display">13.2 kV</span></span>
             </div>
-        </div>
-
-        <div style="margin-top:auto">
-            <h3>LOGS</h3>
-            <div id="logs" style="font-size:11px;max-height:200px;overflow-y:auto"></div>
+            <div class="status-item">
+                <span>FAULTS: <span id="fault-count">0</span></span>
+            </div>
         </div>
     </div>
-</div>
-
-<script>
-let map, nodes={}, lines=[], sensors=[];
-
-async function init(){
-    const data = await window.pywebview.api.get_map_data();
-    nodes = data.nodes;
     
-    // Initialize Map centered on Substation
-    const sub = nodes["650"];
-    map = L.map('map').setView([sub.lat, sub.lng], 15);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
-        attribution:'© OpenStreetMap, © CartoDB'
-    }).addTo(map);
-
-    // Draw Topology
-    data.lines.forEach(l => {
-        const n1 = nodes[l[0]];
-        const n2 = nodes[l[1]];
-        L.polyline([[n1.lat, n1.lng], [n2.lat, n2.lng]], {color:'#555', weight:4}).addTo(map);
-    });
-
-    // Draw Nodes & Populate Select
-    const sel = document.getElementById('sim-node');
-    for(let id in nodes){
-        const n = nodes[id];
-        L.marker([n.lat, n.lng], {
-            icon: L.divIcon({className:'node-icon', iconSize:[10,10]})
-        }).bindPopup(`<b>${n.name}</b><br>ID: ${id}`).addTo(map);
+    <!-- MAP CONTAINER -->
+    <div id="map"></div>
+    
+    <!-- RIGHT SIDE PANEL -->
+    <div class="side-panel">
+        <div class="panel-header">📡 LIVE FEED</div>
+        <div class="live-feed" id="live-feed">
+            <div class="feed-item">
+                <div class="feed-item-id">SYSTEM INITIALIZED</div>
+                <div>Awaiting fault data...</div>
+            </div>
+        </div>
         
-        // Add to dropdown (exclude substation 650 usually)
-        if(id !== "650") {
-            const opt = document.createElement('option');
-            opt.value = id;
-            opt.text = n.name + " (" + id + ")";
-            sel.appendChild(opt);
-        }
-    }
+        <!-- SIMULATION PANEL -->
+        <div class="sim-panel">
+            <h3>🎮 FAULT SIMULATOR</h3>
+            <div class="sim-control">
+                <select class="sim-select" id="bus-select">
+                    <option value="">Select Bus...</option>
+                </select>
+                <select class="sim-select" id="fault-type">
+                    <option value="3LG">3-Phase Ground Fault (3LG)</option>
+                    <option value="SLG">Single Line-Ground (SLG)</option>
+                    <option value="LL">Line-to-Line (LL)</option>
+                    <option value="LLG">Double Line-Ground (LLG)</option>
+                </select>
+                <button class="sim-btn" onclick="injectFault()">INJECT FAULT</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- BOTTOM STATUS BAR -->
+    <div class="status-bar">
+        <div><span class="status-dot online"></span> CONNECTED</div>
+        <div>FREQ: 60.0 Hz</div>
+        <div class="coord-display">CURSOR: <span id="cursor-coord">---, ---</span></div>
+        <div style="margin-left: auto;">LAST UPDATE: <span id="last-update">--:--:--</span></div>
+    </div>
 
-    // Draw Sensors
-    data.sensors.forEach(s => {
-        const n = nodes[s.node];
-        L.marker([n.lat, n.lng], {
-            icon: L.divIcon({html:'📡', className:'sensor-icon', iconSize:[20,20]})
-        }).addTo(map).bindPopup(`<b>Overwatch Unit ${s.id}</b>`);
-    });
-}
-
-async function runSim(){
-    const node = document.getElementById('sim-node').value;
-    const type = document.getElementById('sim-type').value;
-    
-    document.getElementById('result-box').style.display='block';
-    document.getElementById('res-status').innerText = "Calculating...";
-    document.getElementById('res-detail').innerText = "";
-    
-    const res = await window.pywebview.api.simulate_fault(node, type);
-    
-    if(res.error){
-        document.getElementById('res-status').innerText = "❌ ERROR";
-        document.getElementById('res-detail').innerText = res.error;
-    } else {
-        const r = res.report;
-        document.getElementById('res-status').innerText = "⚠️ " + r.status.toUpperCase();
-        document.getElementById('res-detail').innerHTML = 
-            `<b>Type:</b> ${r.type}<br>` +
-            `<b>Est. Dist:</b> ${r.dist} m<br>` +
-            `<b>Current:</b> ${r.amps} A`;
+    <script>
+        let map, markers = [], lines = [], topology = null;
+        let faultData = [];
+        let updateInterval = null;
+        
+// ===== INITIALIZE MAP WITH SIMPLE CRS =====
+        function initMap() {
+            // Use Simple CRS for Cartesian coordinates
+            map = L.map('map', {
+                crs: L.CRS.Simple,
+                minZoom: -5,
+                maxZoom: 2,
+                zoomControl: true,
+                attributionControl: false
+            });
             
-        // Map Visualization
-        L.marker([r.lat, r.lng], {
-            icon: L.divIcon({className:'pulse', iconSize:[20,20]})
-        }).addTo(map).bindPopup(`<b>FAULT DETECTED</b><br>${r.type}`);
+            // Set initial bounds to show entire network
+            const bounds = [[-2000, -2500], [6000, 2500]];
+            map.fitBounds(bounds);
+            
+            // Track cursor coordinates
+            map.on('mousemove', function(e) {
+                const coord = e.latlng;
+                document.getElementById('cursor-coord').textContent = 
+                    `X: ${Math.round(coord.lng)}, Y: ${Math.round(coord.lat)}`;
+            });
+            
+            console.log('✓ Map initialized with Simple CRS');
+        }
         
-        // Add Log
-        const log = document.getElementById('logs');
-        log.innerHTML = `<div style="border-bottom:1px solid #444;padding:4px">
-            <span style="color:var(--crit)">[${r.time}]</span> Fault at ${node} (${r.dist}m)
-        </div>` + log.innerHTML;
-    }
-}
-
-window.onload = init;
-</script>
-</body></html>
+        // ===== DRAW IEEE 13 NODE TOPOLOGY =====
+        async function drawTopology() {
+            try {
+                topology = await window.pywebview.api.get_topology();
+                
+                // Draw connections (lines)
+                topology.connections.forEach(([busA, busB]) => {
+                    const nodeA = topology.nodes[busA];
+                    const nodeB = topology.nodes[busB];
+                    
+                    if (nodeA && nodeB) {
+                        const line = L.polyline(
+                            [[nodeA.y, nodeA.x], [nodeB.y, nodeB.x]],
+                            {
+                                color: '#66fcf1',
+                                weight: 3,
+                                opacity: 0.6
+                            }
+                        ).addTo(map);
+                        
+                        lines.push(line);
+                    }
+                });
+                
+                // Draw nodes (markers)
+                Object.entries(topology.nodes).forEach(([busId, node]) => {
+                    const iconColor = node.type === 'substation' ? '#00ff41' : 
+                                     node.type === 'transformer' ? '#ffa500' :
+                                     node.type === 'load' ? '#ff4d4d' : '#66fcf1';
+                    
+                    const icon = L.divIcon({
+                        html: `<div style="
+                            width: 16px;
+                            height: 16px;
+                            background: ${iconColor};
+                            border: 2px solid #fff;
+                            border-radius: 50%;
+                            box-shadow: 0 0 15px ${iconColor};
+                        "></div>`,
+                        className: '',
+                        iconSize: [16, 16],
+                        iconAnchor: [8, 8]
+                    });
+                    
+                    const marker = L.marker([node.y, node.x], {icon: icon}).addTo(map);
+                    
+                    // Tooltip on hover
+                    marker.bindPopup(`
+                        <div style="padding: 10px;">
+                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">
+                                BUS ${busId}
+                            </div>
+                            <div style="line-height: 1.8;">
+                                <div>Name: ${node.name}</div>
+                                <div>Type: ${node.type.toUpperCase()}</div>
+                                <div>Voltage: ${node.voltage} kV</div>
+                                <div style="color: #00ff41;">Status: NOMINAL</div>
+                                <div style="color: #666; margin-top: 5px;">
+                                    Coord: (${node.x}, ${node.y})
+                                </div>
+                            </div>
+                        </div>
+                    `);
+                    
+                    markers.push(marker);
+                });
+                
+                console.log('✓ Topology drawn: ' + Object.keys(topology.nodes).length + ' nodes');
+                
+            } catch (error) {
+                console.error('❌ Topology draw error:', error);
+            }
+        }
+        
+        // ===== UPDATE FAULT DATA (REAL-TIME) =====
+        async function updateFaults() {
+            try {
+                const newFaults = await window.pywebview.api.get_faults();
+                
+                // Update fault markers
+                // Remove old fault markers (keep topology markers)
+                markers.forEach(m => {
+                    if (m.options && m.options.isFault) {
+                        map.removeLayer(m);
+                    }
+                });
+                markers = markers.filter(m => !m.options || !m.options.isFault);
+                
+                // Add new fault markers
+                newFaults.forEach(fault => {
+                    const color = fault.severity === 'CRITICAL' ? '#ff4d4d' :
+                                 fault.severity === 'WARNING' ? '#ffa500' :
+                                 fault.severity === 'CAUTION' ? '#ffff00' : '#66fcf1';
+                    
+                    const icon = L.divIcon({
+                        html: `<div style="
+                            width: 24px;
+                            height: 24px;
+                            background: ${color};
+                            border: 3px solid #fff;
+                            border-radius: 50%;
+                            box-shadow: 0 0 20px ${color};
+                            animation: pulse 1.5s ease-in-out infinite;
+                        "></div>
+                        <style>
+                            @keyframes pulse {
+                                0%, 100% { transform: scale(1); opacity: 1; }
+                                50% { transform: scale(1.3); opacity: 0.7; }
+                            }
+                        </style>`,
+                        className: '',
+                        iconSize: [24, 24],
+                        iconAnchor: [12, 12]
+                    });
+                    
+                    const marker = L.marker([fault.y, fault.x], {
+                        icon: icon,
+                        isFault: true
+                    }).addTo(map);
+                    
+                    marker.bindPopup(`
+                        <div style="padding: 10px;">
+                            <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px; color: ${color};">
+                                ${fault.severity} FAULT
+                            </div>
+                            <div style="line-height: 1.8;">
+                                <div>ID: ${fault.id}</div>
+                                <div>Device: ${fault.device}</div>
+                                <div>Distance: ${fault.distance} m</div>
+                                <div>Status: ${fault.status}</div>
+                                <div>Time: ${fault.time}</div>
+                                <div style="color: #00ff41; margin-top: 5px;">
+                                    Coord: (${Math.round(fault.x)}, ${Math.round(fault.y)})
+                                </div>
+                            </div>
+                        </div>
+                    `);
+                    
+                    markers.push(marker);
+                });
+                
+                // Update live feed
+                updateLiveFeed(newFaults);
+                
+                // Update status
+                const status = await window.pywebview.api.get_system_status();
+                document.getElementById('fault-count').textContent = status.total_faults;
+                document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+                
+                if (status.critical > 0) {
+                    document.getElementById('system-status').textContent = 'CRITICAL';
+                    document.getElementById('system-status').style.color = '#ff4d4d';
+                } else if (status.warnings > 0) {
+                    document.getElementById('system-status').textContent = 'WARNING';
+                    document.getElementById('system-status').style.color = '#ffa500';
+                } else {
+                    document.getElementById('system-status').textContent = 'ONLINE';
+                    document.getElementById('system-status').style.color = '#00ff41';
+                }
+                
+            } catch (error) {
+                console.error('❌ Fault update error:', error);
+            }
+        }
+        
+        // ===== UPDATE LIVE FEED PANEL =====
+        function updateLiveFeed(faults) {
+            const feed = document.getElementById('live-feed');
+            
+            // Only add new faults to feed (check if already displayed)
+            const existingIds = Array.from(feed.querySelectorAll('.feed-item-id'))
+                .map(el => el.textContent);
+            
+            faults.reverse().forEach(fault => {
+                if (!existingIds.includes(fault.id)) {
+                    const item = document.createElement('div');
+                    item.className = `feed-item ${fault.severity.toLowerCase()}`;
+                    item.innerHTML = `
+                        <div class="feed-item-id">${fault.id}</div>
+                        <div>Severity: ${fault.severity}</div>
+                        <div>Device: ${fault.device}</div>
+                        <div class="feed-item-coord">X: ${Math.round(fault.x)}, Y: ${Math.round(fault.y)}</div>
+                        <div>Distance: ${fault.distance} m</div>
+                        <div>Status: ${fault.status}</div>
+                        <div style="color: #666; margin-top: 5px; font-size: 10px;">${fault.time}</div>
+                    `;
+                    feed.insertBefore(item, feed.firstChild);
+                    
+                    // Keep feed limited to 50 items
+                    if (feed.children.length > 50) {
+                        feed.removeChild(feed.lastChild);
+                    }
+                }
+            });
+        }
+        
+        // ===== INJECT SIMULATED FAULT =====
+        async function injectFault() {
+            const busSelect = document.getElementById('bus-select');
+            const faultType = document.getElementById('fault-type');
+            
+            if (!busSelect.value) {
+                alert('Please select a bus');
+                return;
+            }
+            
+            try {
+                const result = await window.pywebview.api.simulate_fault(
+                    busSelect.value,
+                    faultType.value
+                );
+                
+                console.log('✓ Simulated fault injected:', result);
+                
+                // Add to live feed immediately
+                const feed = document.getElementById('live-feed');
+                const item = document.createElement('div');
+                item.className = `feed-item ${result.severity.toLowerCase()}`;
+                item.innerHTML = `
+                    <div class="feed-item-id">${result.id}</div>
+                    <div>Severity: ${result.severity}</div>
+                    <div>Bus: ${result.device}</div>
+                    <div>Fault Type: ${result.fault_type}</div>
+                    <div>Current: ${result.fault_current} A</div>
+                    <div>Impedance: ${result.impedance} PU</div>
+                    <div>Voltage Drop: ${result.voltage_drop}%</div>
+                    <div class="feed-item-coord">X: ${Math.round(result.x)}, Y: ${Math.round(result.y)}</div>
+                    <div style="color: #666; margin-top: 5px; font-size: 10px;">${result.time}</div>
+                `;
+                feed.insertBefore(item, feed.firstChild);
+                
+                // Add marker to map
+                const color = result.severity === 'CRITICAL' ? '#ff4d4d' :
+                             result.severity === 'WARNING' ? '#ffa500' : '#66fcf1';
+                
+                const icon = L.divIcon({
+                    html: `<div style="
+                        width: 24px;
+                        height: 24px;
+                        background: ${color};
+                        border: 3px solid #fff;
+                        border-radius: 50%;
+                        box-shadow: 0 0 20px ${color};
+                        animation: pulse 1.5s ease-in-out infinite;
+                    "></div>`,
+                    className: '',
+                    iconSize: [24, 24],
+                    iconAnchor: [12, 12]
+                });
+                
+                const marker = L.marker([result.y, result.x], {
+                    icon: icon,
+                    isFault: true
+                }).addTo(map);
+                
+                marker.bindPopup(`
+                    <div style="padding: 10px;">
+                        <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px; color: ${color};">
+                            SIMULATED ${result.severity} FAULT
+                        </div>
+                        <div style="line-height: 1.8;">
+                            <div>ID: ${result.id}</div>
+                            <div>Bus: ${result.device}</div>
+                            <div>Type: ${result.fault_type}</div>
+                            <div>Current: ${result.fault_current} A</div>
+                            <div>Impedance: ${result.impedance} PU</div>
+                            <div>V-Drop: ${result.voltage_drop}%</div>
+                        </div>
+                    </div>
+                `);
+                
+                markers.push(marker);
+                
+                // Zoom to fault
+                map.setView([result.y, result.x], 0);
+                
+            } catch (error) {
+                console.error('❌ Fault injection error:', error);
+                alert('Simulation error: ' + error);
+            }
+        }
+        
+        // ===== POPULATE BUS DROPDOWN =====
+        async function populateBusDropdown() {
+            try {
+                const buses = await window.pywebview.api.get_bus_list();
+                const select = document.getElementById('bus-select');
+                
+                buses.forEach(bus => {
+                    const option = document.createElement('option');
+                    option.value = bus;
+                    option.textContent = `Bus ${bus}`;
+                    select.appendChild(option);
+                });
+                
+            } catch (error) {
+                console.error('❌ Bus dropdown error:', error);
+            }
+        }
+        
+        // ===== INITIALIZATION =====
+        window.addEventListener('pywebviewready', async function() {
+            console.log('✓ PyWebView ready');
+            
+            initMap();
+            await drawTopology();
+            await populateBusDropdown();
+            
+            // Initial data fetch
+            await updateFaults();
+            
+            // Start real-time updates (every 1 second)
+            updateInterval = setInterval(updateFaults, 1000);
+            
+            console.log('✓ System fully initialized - Auto-refresh active');
+        });
+    </script>
+</body>
+</html>
 """
 
-if __name__ == '__main__':
+
+# ============================================================================
+# MAIN APPLICATION
+# ============================================================================
+
+def main():
     api = Api()
-    webview.create_window('Overwatch SCADA - IEEE 13 Feeder', html=HTML, js_api=api, width=1200, height=800)
-    webview.start()
+    
+    window = webview.create_window(
+        "TACTICAL SCADA - IEEE 13 Node Test Feeder",
+        html=HTML,
+        js_api=api,
+        width=1600,
+        height=900,
+        resizable=True,
+        background_color='#0b0c10'
+    )
+    
+    webview.start(debug=False)
+
+
+if __name__ == "__main__":
+    main()
